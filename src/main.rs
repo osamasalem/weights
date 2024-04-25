@@ -29,7 +29,7 @@ fn format_path(path: &Path) -> String {
     if len > 50 {
         format!("{}...{}", &out[0..20], &out[len - 20..])
     } else {
-        format!("{}", path.display())
+        out.to_owned()
     }
 }
 
@@ -78,6 +78,7 @@ impl Folder {
                         (len, folder)
                     });
 
+                    //println!("during task {}", path.display());
                     tasks.push(task);
                 }
             }
@@ -88,8 +89,8 @@ impl Folder {
             self.folders = folders;
 
             self.folders
-                .sort_by(|a, b| b.content_size.partial_cmp(&a.content_size).unwrap());
-            self.files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                .sort_by(|a, b| b.content_size.cmp(&a.content_size));
+            self.files.sort_by(|a, b| b.1.cmp(&a.1));
             self.content_size
         }
         .boxed()
@@ -106,7 +107,6 @@ impl Folder {
                 0.0
             };
 
-            //if ratio > 1.0 {
             println!(
                 "FOLDER {} {} [{} = {:.2}%]",
                 prefix,
@@ -115,7 +115,6 @@ impl Folder {
                 ratio
             );
             folder.print(level + 1);
-            //}
         }
         for file in self.files.iter() {
             let path = &self.path;
@@ -138,7 +137,7 @@ impl Folder {
 
 #[async_std::main]
 async fn main() {
-    let mut f = Folder::new("C:\\".to_owned());
+    let mut f = Folder::new(".".to_owned());
     let _ = f.calculate_size().await;
     f.print(0);
 }
