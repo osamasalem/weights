@@ -1,16 +1,36 @@
+use core::panic;
+
 use async_std::fs::read_dir;
 use async_std::path::{Path, PathBuf};
-use async_std::stream::StreamExt;
 use async_std::task::spawn;
 use futures::future::{join_all, BoxFuture};
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 
-#[derive(Debug)]
-struct Folder {
+enum FSType {
+    Folder(Vec<FSEntity>),
+    File,
+}
+
+impl FSType {
+    fn list(&self) -> &Vec<FSEntity> {
+        match self {
+            FSType::Folder(ref list) => list,
+            _ => panic!("Invalid FSType"),
+        }
+    }
+
+    fn list_mut(&mut self) -> &mut Vec<FSEntity> {
+        match self {
+            FSType::Folder(ref mut list) => list,
+            _ => panic!("Invalid FSType"),
+        }
+    }
+}
+
+struct FSEntity {
     path: PathBuf,
-    folders: Vec<Folder>,
-    content_size: u64,
-    files: Vec<(PathBuf, u64)>,
+    size: u64,
+    kind: FSType,
 }
 
 fn format_size(size: u64) -> String {
@@ -33,14 +53,23 @@ fn format_path(path: &Path) -> String {
     }
 }
 
-impl Folder {
-    fn new(name: impl Into<PathBuf>) -> Self {
-        Folder {
+impl FSEntity {
+    async fn file(name: impl Into<PathBuf>, size: u64) -> Self {
+        FSEntity {
             path: name.into(),
-            folders: Vec::new(),
-            content_size: 0,
-            files: Vec::new(),
+            size,
+            kind: FSType::File,
         }
+    }
+
+    async fn folder(name: impl Into<PathBuf>) -> Self {
+        let mut entity = FSEntity {
+            path: name.into(),
+            size: 0,
+            kind: FSType::Folder(vec![]),
+        };
+        entity.size = entity.calculate_size().await;
+        entity
     }
 
     fn calculate_size(&mut self) -> BoxFuture<u64> {
@@ -50,6 +79,8 @@ impl Folder {
             let Ok(mut dir) = read_dir(self.path.to_string_lossy().into_owned()).await else {
                 return 0;
             };
+
+            let list = self.kind.list_mut();
 
             while let Some(entry) = dir.next().await {
                 let Ok(entry) = entry else {
@@ -68,76 +99,59 @@ impl Folder {
                 };
 
                 if file_type.is_file() {
-                    let len = metadata.len();
-                    self.content_size += len;
-                    self.files.push((PathBuf::from(entry.file_name()), len));
+                    list.push(FSEntity::file(path, metadata.len()).await)
                 } else {
-                    let task = spawn(async {
-                        let mut folder = Folder::new(path);
-                        let len = folder.calculate_size().await;
-                        (len, folder)
-                    });
-
-                    //println!("during task {}", path.display());
-                    tasks.push(task);
+                    tasks.push(spawn(async { FSEntity::folder(path).await }));
                 }
             }
-            let results = join_all(tasks).await;
-            let (sizes, folders): (Vec<_>, Vec<_>) = results.into_iter().unzip();
+            let mut results = join_all(tasks).await;
+            list.append(&mut results);
+            self.size += results.iter().map(|x| x.size).sum::<u64>();
 
-            self.content_size += sizes.iter().sum::<u64>();
-            self.folders = folders;
-
-            self.folders
-                .sort_by(|a, b| b.content_size.cmp(&a.content_size));
-            self.files.sort_by(|a, b| b.1.cmp(&a.1));
-            self.content_size
+            self.size
         }
         .boxed()
     }
 
     fn print(&self, level: i32) {
-        let prefix = (0..level).map(|_| "->").collect::<String>();
+        let mut prefix = (0..level - 1).map(|_| "| ").collect::<String>();
+        prefix.push_str("|_");
 
-        for folder in self.folders.iter() {
-            let path = &folder.path;
-            let ratio = if self.content_size != 0 {
-                folder.content_size as f64 * 100.0 / self.content_size as f64
+        let list = self.kind.list();
+
+        for entity in list.iter() {
+            let path = &entity.path;
+            let ratio = if self.size != 0 {
+                entity.size as f64 * 100.0 / self.size as f64
             } else {
                 0.0
             };
 
-            println!(
-                "FOLDER {} {} [{} = {:.2}%]",
-                prefix,
-                format_path(path),
-                format_size(folder.content_size),
-                ratio
-            );
-            folder.print(level + 1);
-        }
-        for file in self.files.iter() {
-            let path = &self.path;
-            let ratio = if self.content_size != 0 {
-                file.1 as f64 * 100.0 / self.content_size as f64
-            } else {
-                0.0
-            };
-
-            println!(
-                "FILE   {} {} [{} = {:.2}%]",
-                prefix,
-                format_path(&path.join(&file.0)),
-                (format_size(file.1)),
-                ratio
-            );
+            match entity.kind {
+                FSType::Folder(_) => {
+                    println!(
+                        "FOLDER {} {} [{} = {:.2}%]",
+                        prefix,
+                        format_path(path),
+                        format_size(entity.size),
+                        ratio
+                    );
+                    entity.print(level + 1)
+                }
+                FSType::File => println!(
+                    "FILE   {} {} [{} = {:.2}%]",
+                    prefix,
+                    format_path(path),
+                    format_size(entity.size),
+                    ratio
+                ),
+            }
         }
     }
 }
 
 #[async_std::main]
 async fn main() {
-    let mut f = Folder::new(".".to_owned());
-    let _ = f.calculate_size().await;
+    let f = FSEntity::folder(".".to_owned()).await;
     f.print(0);
 }
